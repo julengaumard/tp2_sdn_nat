@@ -3,6 +3,7 @@ from pox.core import core                       # Main POX object
 import pox.openflow.libopenflow_01 as of        # OpenFlow 1.0 library
 from pox.lib.addresses import EthAddr, IPAddr   # Address types
 from pox.lib.packet.ethernet import ethernet
+from pox.lib.packet import ipv4, arp
 
 log = core.getLogger()
 RED = "\033[31m"
@@ -32,6 +33,15 @@ class ProtoRouter(object):
         self.connection = connection
         connection.addListeners(self)
 
+        # Aca se podrian ir guerdando la relaciones, una vez descubiertas.
+            # Tal vez hay que gaurdar el paquete, en transito, que no conoce la MAC, para enviarlo una vez la descubra?
+        self.arp_table = {
+            # IP: (MAC, puerto)
+        }
+
+    # Punto de entrada del paquete, solamente si el hard, NO ENCONTRO UNA REGLA
+        # Por lo cual, para una conexion activa, solo deberias de ver el primer paquete. (U otro, si vence la regla)
+        # Tanto entrada a la red local, como salida.
     def _handle_PacketIn(self, event):
         if not event.parsed.parsed:
             log.warning("[DROP] PacketIn con trama no reconocida. POX no pudo decodificar el paquete.")
@@ -39,18 +49,52 @@ class ProtoRouter(object):
 
         if event.parsed.type == ethernet.IP_TYPE:
             self.handle_ip(event)
+        # Tal vez aca hay que implementar para los ARP
+        # elif event.parsed.type == ethernet.ARP_TYPE:
+        #     self.handle_arp(event)
         else:
-            log_color(YELLOW, f"Paquete ignorado: protocolo distinto de IPv4.")
+            log_color(YELLOW, f"Paquete ignorado: protocolo distinto de IPv4 o ARP.")
 
     def handle_ip(self, event):
         packet = event.parsed
         ip_pkt = packet.payload
         in_port = event.port
 
+        ip_packet = packet.find('ipv4')
+        if ip_packet is None:
+            return
+
+        # Ahora para debug. Se necesita, porque puede haber conexiones en el mismo.
+        if ip_packet.protocol == ipv4.TCP_PROTOCOL:
+            log_color(GREEN, "TCP")
+        elif ip_packet.protocol == ipv4.UDP_PROTOCOL:
+            log_color(GREEN, "UDP")
+        else:
+            log_color(GREEN, "OTROooo")
+
+        # # Ethernet
+        # eth = packet.find('ethernet')
+        # src_mac = eth.src
+        # dst_mac = eth.dst
+
+        # # IPv4
+        # ip = packet.find('ipv4')
+        # src_ip = ip.srcip
+        # dst_ip = ip.dstip
+        # protocol = ip.protocol
+
+        # # TCP / UDP
+        # transport = packet.find('tcp') or packet.find('udp')
+
+        # if transport:
+        #     src_port = transport.srcport
+        #     dst_port = transport.dstport
+
         log_color(
             YELLOW, f"RECIBIDO: {ip_pkt.srcip} → {ip_pkt.dstip} | "
             f"MAC: {packet.src} → {packet.dst} | In Port: {in_port}")
 
+        # Desde la red privada
         if ip_pkt.srcip.inNetwork(PRIVATE_SUBNET, PRIVATE_MASK):
 
             log_color(GREEN, f"MATCH: {ip_pkt.srcip} pertenece a la red privada {PRIVATE_SUBNET}/{PRIVATE_MASK}")
@@ -95,9 +139,26 @@ class ProtoRouter(object):
             log_color(CYAN, f"ENVIANDO: {ip_pkt.srcip} → {ip_pkt.dstip} | MAC: {PUBLIC_MAC} → {H1_MAC} | Out Port: {PUBLIC_PORT}")
             self.connection.send(msg)
 
-        else:
+        else:   # Desde la red publica (Paquete entrante.)
             log_color(RED, f"NO MATCH: {ip_pkt.srcip} no pertenece a {PRIVATE_SUBNET}/{PRIVATE_MASK}")
 
+    # Puede ser que sea solo esto, por lo que investigue.
+    def handle_arp(self, event):
+        # 1. Obtener paquete ARP.
+        # 2. Aprender IP -> MAC del emisor.
+        # 3. Si es Request dirigido a una IP del router:
+        #       Generar ARP Reply.
+        # 4. Si es Reply:
+        #       Resolver paquetes pendientes.
+        pass
+
+    def resolve_arp(self, target_ip, out_port):
+        # 1. Consultar tabla ARP.
+        # 2. Si existe, devolver MAC.
+        # 3. Si no existe:
+        #       Guardar paquete pendiente.
+        #       Generar ARP Request.
+        pass
 
 def launch():
 

@@ -27,17 +27,43 @@ PUBLIC_PORT = 1                             # Puerto del switch conectado a la r
 
 H1_MAC = EthAddr("00:00:00:00:00:01")       # MAC del host externo (TODO: resolver mediante ARP)
 
+# TODO: moverlos a un archivo de methods.py
+def is_private(ip):
+    mask = (0xFFFFFFFF << (32 - PRIVATE_MASK)) & 0xFFFFFFFF
+    return (ip.toUnsigned() & mask) == PRIVATE_SUBNET.toUnsigned()
+
+def create_arp_reply(src_mac, src_ip, dst_mac, dst_ip):
+    packet = arp()
+    packet.opcode = arp.REPLY
+
+    packet.hwsrc = EthAddr(src_mac)
+    packet.protosrc = IPAddr(src_ip)
+
+    packet.hwdst = EthAddr(dst_mac)
+    packet.protodst = IPAddr(dst_ip)
+
+    return packet
+
+def send_arp_reply(self, event, arp_reply):
+    eth_packet = ethernet()
+    eth_packet.type = ethernet.ARP_TYPE
+
+    eth_packet.src = arp_reply.hwsrc
+    eth_packet.dst = arp_reply.hwdst
+    eth_packet.payload = arp_reply
+
+    msg = of.ofp_packet_out()
+    msg.data = eth_packet.pack()
+    msg.actions.append(of.ofp_action_output(port=event.port))
+
+    self.connection.send(msg)
 
 class ProtoRouter(object):
     def __init__(self, connection):
         self.connection = connection
         connection.addListeners(self)
 
-        # Aca se podrian ir guerdando la relaciones, una vez descubiertas.
-            # Tal vez hay que gaurdar el paquete, en transito, que no conoce la MAC, para enviarlo una vez la descubra?
-        self.arp_table = {
-            # IP: (MAC, puerto)
-        }
+        self.arp_table = {}     # Se registra {IP: MAC}
 
     # Punto de entrada del paquete, solamente si el hard, NO ENCONTRO UNA REGLA
         # Por lo cual, para una conexion activa, solo deberias de ver el primer paquete. (U otro, si vence la regla)
@@ -49,9 +75,8 @@ class ProtoRouter(object):
 
         if event.parsed.type == ethernet.IP_TYPE:
             self.handle_ip(event)
-        # Tal vez aca hay que implementar para los ARP
-        # elif event.parsed.type == ethernet.ARP_TYPE:
-        #     self.handle_arp(event)
+        elif event.parsed.type == ethernet.ARP_TYPE:
+            self.handle_arp(event)
         else:
             log_color(YELLOW, f"Paquete ignorado: protocolo distinto de IPv4 o ARP.")
 
@@ -142,16 +167,55 @@ class ProtoRouter(object):
         else:   # Desde la red publica (Paquete entrante.)
             log_color(RED, f"NO MATCH: {ip_pkt.srcip} no pertenece a {PRIVATE_SUBNET}/{PRIVATE_MASK}")
 
-    # Puede ser que sea solo esto, por lo que investigue.
     def handle_arp(self, event):
-        # 1. Obtener paquete ARP.
-        # 2. Aprender IP -> MAC del emisor.
-        # 3. Si es Request dirigido a una IP del router:
-        #       Generar ARP Reply.
-        # 4. Si es Reply:
-        #       Resolver paquetes pendientes.
+        # Obtiene el payload del paquete Ethernet
+        arp_pkt = event.parsed.find('arp')
+
+        print("Es un evento ARP, type: ", arp_pkt.opcode)
+        print("MAC origen:", arp_pkt.hwsrc)
+        print("MAC destino:", arp_pkt.hwdst)
+        print("IP origen:", arp_pkt.protosrc)
+        print("IP destino:", arp_pkt.protodst)
+
+        # Aprender IP -> MAC
+        self.arp_table[arp_pkt.protosrc] = arp_pkt.hwsrc
+            # {IP origen: MAC origen}
+ 
+        # Debemos manejarlo diferente, dependiendo de si es una Request o Reply
+        if arp_pkt.opcode == arp.REQUEST:
+            
+            if is_private(arp_pkt.protodst):
+                arp_reply = create_arp_reply(
+                    PRIVATE_MAC, PRIVATE_IP,
+                    arp_pkt.hwsrc, arp_pkt.protosrc
+                )
+                 
+            else:
+                arp_reply = create_arp_reply(
+                    PUBLIC_MAC, PUBLIC_IP,
+                    arp_pkt.hwsrc, arp_pkt.protosrc
+                )
+
+            send_arp_reply(self, event, arp_reply)
+ 
+        # TODO:
+            # Ahora solo responde para si mismo, porque no hay otro host local, para pasar un mensaje de ARP
+            # Preguntar si agregamos eso o con esto ya esta.
+
+        # DUDA:
+            # Hay que permitir que resuelva de fuera? 
+            # O hay que bloquearlo?
+
+        # Idea general (si hubiese mas host locales)
+            # 1. Obtener paquete ARP.
+            # 2. Aprender IP -> MAC del emisor.
+            # 3. Si es Request dirigido a una IP del router:
+            #       Generar ARP Reply.
+            # 4. Si es Reply:
+            #       Resolver paquetes pendientes.
         pass
 
+    # Solo si hay mas host locales
     def resolve_arp(self, target_ip, out_port):
         # 1. Consultar tabla ARP.
         # 2. Si existe, devolver MAC.

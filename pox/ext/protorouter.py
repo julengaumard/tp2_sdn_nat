@@ -58,12 +58,50 @@ def send_arp_reply(self, event, arp_reply):
 
     self.connection.send(msg)
 
+def create_arp_request(
+    target_ip,   # IP del dispositivo cuya MAC queremos averiguar.
+    out_port,    # Puerto OpenFlow por el que enviaremos el ARP Request.
+    router_mac,  # MAC de la interfaz del router conectada a esa red.
+    router_ip    # IP de esa misma interfaz del router.
+):
+
+    # Crear paquete ARP.
+    arp_req = arp()
+    arp_req.hwtype = arp.HW_TYPE_ETHERNET
+    arp_req.prototype = arp.PROTO_TYPE_IP
+    arp_req.hwlen = 6
+    arp_req.protolen = 4
+    arp_req.opcode = arp.REQUEST
+
+    # Datos de la interfaz del router desde la que se consulta.
+    arp_req.hwsrc = router_mac
+    arp_req.protosrc = router_ip
+
+    # MAC destino desconocida.
+    arp_req.hwdst = EthAddr("00:00:00:00:00:00")
+    arp_req.protodst = target_ip
+
+    # Encapsular en Ethernet.
+    eth = ethernet()
+    eth.type = ethernet.ARP_TYPE
+    eth.src = router_mac
+    eth.dst = EthAddr("ff:ff:ff:ff:ff:ff")
+    eth.payload = arp_req
+
+    # Enviar broadcast por la interfaz correspondiente.
+    msg = of.ofp_packet_out()
+    msg.data = eth.pack()
+    msg.actions.append(of.ofp_action_output(port=out_port))
+
+    return msg
+
 class ProtoRouter(object):
     def __init__(self, connection):
         self.connection = connection
         connection.addListeners(self)
 
         self.arp_table = {}     # Se registra {IP: MAC}
+        self.pending_packets = {}   # Guarda los paquetes, para los que se desconocia la MAC destino (Se genero un ARP request)
 
     # Punto de entrada del paquete, solamente si el hard, NO ENCONTRO UNA REGLA
         # Por lo cual, para una conexion activa, solo deberias de ver el primer paquete. (U otro, si vence la regla)
@@ -124,6 +162,19 @@ class ProtoRouter(object):
 
             log_color(GREEN, f"MATCH: {ip_pkt.srcip} pertenece a la red privada {PRIVATE_SUBNET}/{PRIVATE_MASK}")
 
+            # TODO: La IP destino debe cambiar con NAT, asi que eso ocurre antes de esto.
+            mac_dst = self.resolve_arp(ip_pkt.dstip, PUBLIC_PORT, PUBLIC_MAC, PUBLIC_IP, event)
+            # Si la MAC, no se conoce, debemos enviar la ARP Request
+                # Y almacenar el paquete para el envio posterior
+            if mac_dst is None:
+                log_color(
+                    RED, f"RECIBIDO: {ip_pkt.srcip} → {ip_pkt.dstip} | "
+                    f"No se conoce MAC destino. Se envio un ARP Request")
+                # No se conoce, no podemos seguir con el flujo
+                # A la espera de la respuesta de ARP.
+                return
+
+            # TODO: Tal vez meter todo esto en un metodo?
             # Instalar Flujo Saliente
             fm = of.ofp_flow_mod()
             fm.idle_timeout = 10
@@ -135,7 +186,7 @@ class ProtoRouter(object):
 
             # Acción (Saliente)
             fm.actions.append(of.ofp_action_dl_addr.set_src(PUBLIC_MAC))
-            fm.actions.append(of.ofp_action_dl_addr.set_dst(H1_MAC))
+            fm.actions.append(of.ofp_action_dl_addr.set_dst(mac_dst))
             fm.actions.append(of.ofp_action_output(port=PUBLIC_PORT))
             self.connection.send(fm)
 
@@ -157,21 +208,25 @@ class ProtoRouter(object):
 
             # Reenviar paquete actual con MACs actualizadas (Los posteriores pasan por flujo)
             packet.src = PUBLIC_MAC
-            packet.dst = H1_MAC
+            packet.dst = mac_dst
             msg = of.ofp_packet_out()
             msg.data = packet.pack()
             msg.actions.append(of.ofp_action_output(port=PUBLIC_PORT))
-            log_color(CYAN, f"ENVIANDO: {ip_pkt.srcip} → {ip_pkt.dstip} | MAC: {PUBLIC_MAC} → {H1_MAC} | Out Port: {PUBLIC_PORT}")
+            log_color(CYAN, f"ENVIANDO: {ip_pkt.srcip} → {ip_pkt.dstip} | MAC: {PUBLIC_MAC} → {mac_dst} | Out Port: {PUBLIC_PORT}")
             self.connection.send(msg)
 
         else:   # Desde la red publica (Paquete entrante.)
             log_color(RED, f"NO MATCH: {ip_pkt.srcip} no pertenece a {PRIVATE_SUBNET}/{PRIVATE_MASK}")
+            # TODO: Hay que generar ARP aca? 
+                # Osea, no hay codigo para enviar el paquete.
+                    # Estaria bloqueando que entre trafico desde fuera.
+                    # Confirmar
 
     def handle_arp(self, event):
         # Obtiene el payload del paquete Ethernet
         arp_pkt = event.parsed.find('arp')
 
-        print("Es un evento ARP, type: ", arp_pkt.opcode)
+        print("Es una REQUEST? ", arp_pkt.opcode == arp.REQUEST)
         print("MAC origen:", arp_pkt.hwsrc)
         print("MAC destino:", arp_pkt.hwdst)
         print("IP origen:", arp_pkt.protosrc)
@@ -183,7 +238,8 @@ class ProtoRouter(object):
  
         # Debemos manejarlo diferente, dependiendo de si es una Request o Reply
         if arp_pkt.opcode == arp.REQUEST:
-            
+
+            # Creo q hay metodo, en handle_ip para chequear esto. Y volamos este
             if is_private(arp_pkt.protodst):
                 arp_reply = create_arp_reply(
                     PRIVATE_MAC, PRIVATE_IP,
@@ -197,31 +253,53 @@ class ProtoRouter(object):
                 )
 
             send_arp_reply(self, event, arp_reply)
+
+        # Si recibe una Reply, es de alguna Request que genero.
+            # Asi que busca los paquetes pendientes y los envia.
+        if arp_pkt.opcode == arp.REPLY:
+            pending = self.pending_packets.pop(arp_pkt.protosrc, [])
+            for item in pending:
+                print("eberia enviar", item)
+                self.handle_ip(item["event"])
+            return
  
         # TODO:
             # Ahora solo responde para si mismo, porque no hay otro host local, para pasar un mensaje de ARP
             # Preguntar si agregamos eso o con esto ya esta.
-
-        # DUDA:
-            # Hay que permitir que resuelva de fuera? 
-            # O hay que bloquearlo?
-
-        # Idea general (si hubiese mas host locales)
-            # 1. Obtener paquete ARP.
-            # 2. Aprender IP -> MAC del emisor.
-            # 3. Si es Request dirigido a una IP del router:
-            #       Generar ARP Reply.
-            # 4. Si es Reply:
-            #       Resolver paquetes pendientes.
+            # DUDA:
+                # Hay que permitir que resuelva de fuera? 
+                # O hay que bloquearlo?
         pass
 
     # Solo si hay mas host locales
-    def resolve_arp(self, target_ip, out_port):
-        # 1. Consultar tabla ARP.
-        # 2. Si existe, devolver MAC.
-        # 3. Si no existe:
-        #       Guardar paquete pendiente.
-        #       Generar ARP Request.
+
+    def resolve_arp(self, target_ip, out_port, router_mac, router_ip, event):
+        # Si ya conocemos la MAC, la devolvemos.
+        if target_ip in self.arp_table:
+            return self.arp_table[target_ip]
+
+        # Debemos guardar el paquete y generar la ARP request
+        if target_ip not in self.pending_packets:
+            self.pending_packets[target_ip] = []
+
+            # Enviar ARP Request solamente si todavía no hay una consulta pendiente.
+            msg = create_arp_request(
+                target_ip, out_port, router_mac, router_ip
+            )
+            self.connection.send(msg)
+
+        # Agregar el Event (que incluye el paquete) a la lista de pendientes.
+            # Ya que mientras se espera respuesta, podria llegar otro paquete, que no sabemos como resolver.
+        self.pending_packets[target_ip].append({"event": event})
+
+        return None 
+
+    # TODO: Se podria poner aca lo de fowarding? Asi se simplifica el handle_ip a simplemente a determinar y hacer llamados
+    def forward_packet(self, packet, in_port, out_port,
+                   src_mac, dst_mac):
+        # Instalar flujo OpenFlow.
+        # Modificar MACs.
+        # Reenviar paquete.
         pass
 
 def launch():

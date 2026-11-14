@@ -286,6 +286,7 @@ class ProtoRouter(object):
             msg = create_arp_request(
                 target_ip, out_port, router_mac, router_ip
             )
+            # TODO: Agregar un log_color
             self.connection.send(msg)
 
         # Agregar el Event (que incluye el paquete) a la lista de pendientes.

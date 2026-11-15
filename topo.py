@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+import sys
 from mininet.topo import Topo
 from mininet.net import Mininet
 from mininet.node import RemoteController
@@ -32,14 +33,20 @@ class NATTopo(Topo):
     def build(self):
         s1 = self.addSwitch('s1')
 
-        h1 = self.addHost('h1', ip='200.0.0.1/24',
-                          mac='00:00:00:00:00:01', defaultRoute='via 200.0.0.254')
-
-        h2 = self.addHost('h2', ip='192.168.1.2/24', mac='00:00:00:00:00:02',
-                          defaultRoute='via 192.168.1.254')
-
+        h1 = self.addHost('h1', 
+                          ip='"200.0.0.1"/24',
+                          mac='00:00:00:00:00:01',
+                          defaultRoute='via 200.0.0.254')
+        
         self.addLink(h1, s1)
-        self.addLink(h2, s1)
+
+        for i in range(2, 2 + cant_host_privados):
+            host_privado = self.addHost(f"h{i}",
+                                        ip=f"192.168.1.{i}/24",
+                                        mac=f"00:00:00:00:00:0{i}",
+                                        defaultRoute="via 192.168.1.254")
+            self.addLink(host_privado, s1)
+
 
 
 def run():
@@ -59,14 +66,11 @@ def run():
     s1.cmd("sysctl -w net.ipv6.conf.default.disable_ipv6=1")
     s1.cmd("sysctl -w net.ipv6.conf.lo.disable_ipv6=1")
 
-    # Entradas ARP para debug (TODO: Usar Protocolo ARP)
-    # net.get('h1').setARP('200.0.0.254', '00:00:00:aa:aa:aa')
-    # net.get('h2').setARP('192.168.1.254', '00:00:00:bb:bb:bb')
-
     CLI(net)
     net.stop()
 
 
 if __name__ == '__main__':
     setLogLevel('info')
+    cant_host_privados = min(int(sys.argv[1]) if len(sys.argv) > 1 else 3, 8)
     run()

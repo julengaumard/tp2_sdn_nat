@@ -4,6 +4,8 @@ import pox.openflow.libopenflow_01 as of        # OpenFlow 1.0 library
 from pox.lib.addresses import EthAddr, IPAddr   # Address types
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.packet import ipv4, arp
+from structs import NATTable
+
 
 log = core.getLogger()
 RED = "\033[31m"
@@ -24,8 +26,6 @@ PUBLIC_IP = IPAddr("200.0.0.254")           # IP del router en la red pública
 PUBLIC_MAC = EthAddr("00:00:00:aa:aa:aa")   # MAC del router hacia la red pública
 PRIVATE_MAC = EthAddr("00:00:00:bb:bb:bb")  # MAC del router hacia la red privada
 PUBLIC_PORT = 1                             # Puerto del switch conectado a la red pública
-
-H1_MAC = EthAddr("00:00:00:00:00:01")       # MAC del host externo (TODO: resolver mediante ARP)
 
 # TODO: moverlos a un archivo de methods.py
 def is_private(ip):
@@ -102,6 +102,7 @@ class ProtoRouter(object):
 
         self.arp_table = {}     # Se registra {IP: MAC}
         self.pending_packets = {}   # Guarda los paquetes, para los que se desconocia la MAC destino (Se genero un ARP request)
+        self.nat_table = NATTable(PUBLIC_IP)
 
     # Punto de entrada del paquete, solamente si el hard, NO ENCONTRO UNA REGLA
         # Por lo cual, para una conexion activa, solo deberias de ver el primer paquete. (U otro, si vence la regla)
@@ -135,24 +136,6 @@ class ProtoRouter(object):
         else:
             log_color(GREEN, "OTROooo")
 
-        # # Ethernet
-        # eth = packet.find('ethernet')
-        # src_mac = eth.src
-        # dst_mac = eth.dst
-
-        # # IPv4
-        # ip = packet.find('ipv4')
-        # src_ip = ip.srcip
-        # dst_ip = ip.dstip
-        # protocol = ip.protocol
-
-        # # TCP / UDP
-        # transport = packet.find('tcp') or packet.find('udp')
-
-        # if transport:
-        #     src_port = transport.srcport
-        #     dst_port = transport.dstport
-
         log_color(
             YELLOW, f"RECIBIDO: {ip_pkt.srcip} → {ip_pkt.dstip} | "
             f"MAC: {packet.src} → {packet.dst} | In Port: {in_port}")
@@ -162,7 +145,6 @@ class ProtoRouter(object):
 
             log_color(GREEN, f"MATCH: {ip_pkt.srcip} pertenece a la red privada {PRIVATE_SUBNET}/{PRIVATE_MASK}")
 
-            # TODO: La IP destino debe cambiar con NAT, asi que eso ocurre antes de esto.
             mac_dst = self.resolve_arp(ip_pkt.dstip, PUBLIC_PORT, PUBLIC_MAC, PUBLIC_IP, event)
             # Si la MAC, no se conoce, debemos enviar la ARP Request
                 # Y almacenar el paquete para el envio posterior
@@ -174,19 +156,42 @@ class ProtoRouter(object):
                 # A la espera de la respuesta de ARP.
                 return
 
-            # TODO: Tal vez meter todo esto en un metodo?
-            # Instalar Flujo Saliente
+            transport = packet.find('tcp') or packet.find('udp')
+            if transport is None:
+                log_color(YELLOW, "Protocolo no soportado para NAT por puertos (Solo UDP/TCP)")
+                return 
+
+            #Consulta/crea la traducción en la tabla NAT
+            conn = self.nat_table.translate_outbound(
+                protocol = ip_pkt.protocol,
+                src_ip = ip_pkt.srcip,
+                src_port = transport.srcport,
+                dst_ip = ip_pkt.dstip,
+                dst_port = transport.dstport
+            )
+
             fm = of.ofp_flow_mod()
             fm.idle_timeout = 10
 
             # Filtro (Saliente)
-            fm.match.nw_src = ip_pkt.srcip
-            fm.match.dl_type = 0x800  # IPv4
             fm.match.in_port = in_port
+            fm.match.dl_type = 0x800 #Ipv4
+            fm.match.nw_proto = ip_pkt.protocol
+            fm.match.nw_src = ip_pkt.srcip
+            fm.match.nw_dst = ip_pkt.dstip
+            fm.match.tp_src = transport.srcport
+            fm.match.tp_dst = transport.dstport
+
 
             # Acción (Saliente)
+            # Reescribe Macs (Origen: Mac publica del router, destino: Mac del servidor publico)
+            # Traduce ip origen privada a public_ip del router
+            # Puerto origen privado a nat_port asignado en la tabla 
+
             fm.actions.append(of.ofp_action_dl_addr.set_src(PUBLIC_MAC))
             fm.actions.append(of.ofp_action_dl_addr.set_dst(mac_dst))
+            fm.actions.append(of.ofp_action_nw_addr.set_src(PUBLIC_IP))
+            fm.actions.append(of.ofp_action_tp_port.set_src(conn.nat_port))
             fm.actions.append(of.ofp_action_output(port=PUBLIC_PORT))
             self.connection.send(fm)
 
@@ -195,32 +200,37 @@ class ProtoRouter(object):
             fm_back.idle_timeout = 10
 
             # Filtro (Entrante)
-            fm_back.match.nw_src = ip_pkt.dstip
-            fm_back.match.nw_dst = ip_pkt.srcip
-            fm_back.match.dl_type = 0x800  # IPv4
             fm_back.match.in_port = PUBLIC_PORT
+            fm_back.match.dl_type = 0x800  # IPv4
+            fm_back.match.nw_proto = ip_pkt.protocol
+            fm_back.match.nw_src = ip_pkt.dstip
+            fm_back.match.nw_dst = PUBLIC_IP
+            fm_back.match.tp_src = transport.dstport
+            fm_back.match.tp_dst = conn.nat_port
 
             # Acción (Entrante)
             fm_back.actions.append(of.ofp_action_dl_addr.set_src(PRIVATE_MAC))
             fm_back.actions.append(of.ofp_action_dl_addr.set_dst(packet.src))
+            fm_back.actions.append(of.ofp_action_nw_addr.set_dst(conn.src_ip))
+            fm_back.actions.append(of.ofp_action_tp_port.set_dst(conn.src_port))
             fm_back.actions.append(of.ofp_action_output(port=in_port))
             self.connection.send(fm_back)
 
-            # Reenviar paquete actual con MACs actualizadas (Los posteriores pasan por flujo)
-            packet.src = PUBLIC_MAC
-            packet.dst = mac_dst
+            # 6. Enviar el primer paquete actual por el puerto público (aplicándole las mismas acciones de traducción)
             msg = of.ofp_packet_out()
             msg.data = packet.pack()
-            msg.actions.append(of.ofp_action_output(port=PUBLIC_PORT))
-            log_color(CYAN, f"ENVIANDO: {ip_pkt.srcip} → {ip_pkt.dstip} | MAC: {PUBLIC_MAC} → {mac_dst} | Out Port: {PUBLIC_PORT}")
+            msg.in_port = in_port
+            msg.actions = fm.actions
             self.connection.send(msg)
 
-        else:   # Desde la red publica (Paquete entrante.)
-            log_color(RED, f"NO MATCH: {ip_pkt.srcip} no pertenece a {PRIVATE_SUBNET}/{PRIVATE_MASK}")
-            # TODO: Hay que generar ARP aca? 
-                # Osea, no hay codigo para enviar el paquete.
-                    # Estaria bloqueando que entre trafico desde fuera.
-                    # Confirmar
+            log_color(
+                CYAN, f"NAT OUT: {ip_pkt.srcip}:{transport.srcport} → {PUBLIC_IP}:{conn.nat_port} | "
+                f"DST: {ip_pkt.dstip}:{transport.dstport} | MAC: {PUBLIC_MAC} → {mac_dst} | Out Port: {PUBLIC_PORT}")
+
+        else:   # Desde la red pública (Paquete entrante sin flujo instalado)
+            # Al ser un NAT saliente, si un paquete entra desde la red pública y no matcheó con ninguna regla
+            # entrante activa en el switch, es tráfico externo no solicitado y se descarta.
+            log_color(RED, f"DROP: Tráfico entrante no solicitado desde {ip_pkt.srcip} hacia {ip_pkt.dstip}")
 
     def handle_arp(self, event):
         # Obtiene el payload del paquete Ethernet

@@ -43,7 +43,7 @@ class NATTopo(Topo):
         for i in range(2, 2 + cant_host_privados):
             host_privado = self.addHost(f"h{i}",
                                         ip=f"192.168.1.{i}/24",
-                                        mac=f"00:00:00:00:00:0{i}",
+                                        mac=f"00:00:00:00:00:{i:02x}", # para soportar mas de 10 hosts privados
                                         defaultRoute="via 192.168.1.254")
             self.addLink(host_privado, s1)
 

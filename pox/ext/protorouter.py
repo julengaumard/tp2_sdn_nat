@@ -28,10 +28,6 @@ PRIVATE_MAC = EthAddr("00:00:00:bb:bb:bb")  # MAC del router hacia la red privad
 PUBLIC_PORT = 1                             # Puerto del switch conectado a la red pública
 
 # TODO: moverlos a un archivo de methods.py
-def is_private(ip):
-    mask = (0xFFFFFFFF << (32 - PRIVATE_MASK)) & 0xFFFFFFFF
-    return (ip.toUnsigned() & mask) == PRIVATE_SUBNET.toUnsigned()
-
 def create_arp_reply(src_mac, src_ip, dst_mac, dst_ip):
     packet = arp()
     packet.opcode = arp.REPLY
@@ -249,18 +245,20 @@ class ProtoRouter(object):
         # Debemos manejarlo diferente, dependiendo de si es una Request o Reply
         if arp_pkt.opcode == arp.REQUEST:
 
-            # Creo q hay metodo, en handle_ip para chequear esto. Y volamos este
-            if is_private(arp_pkt.protodst):
+            # Solo responde a requests de IPs del router
+            if arp_pkt.protodst == PRIVATE_IP:
                 arp_reply = create_arp_reply(
                     PRIVATE_MAC, PRIVATE_IP,
                     arp_pkt.hwsrc, arp_pkt.protosrc
                 )
-                 
-            else:
+            elif arp_pkt.protodst == PUBLIC_IP:
                 arp_reply = create_arp_reply(
                     PUBLIC_MAC, PUBLIC_IP,
                     arp_pkt.hwsrc, arp_pkt.protosrc
                 )
+            else: # si se consulta por otro host
+                log_color(YELLOW, f"ARP Request ignorada: {arp_pkt.protodst} no es una IP del router.")
+                return
 
             send_arp_reply(self, event, arp_reply)
 

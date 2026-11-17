@@ -4,7 +4,7 @@ import pox.openflow.libopenflow_01 as of        # OpenFlow 1.0 library
 from pox.lib.addresses import EthAddr, IPAddr   # Address types
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.packet import ipv4, arp
-from structs import NATTable
+from structs import NATTable, FLOW_OUT, FLOW_IN
 
 
 log = core.getLogger()
@@ -168,6 +168,7 @@ class ProtoRouter(object):
 
             fm = of.ofp_flow_mod()
             fm.idle_timeout = 10
+            fm.flags |= of.OFPFF_SEND_FLOW_REM  # Flag que hace que el switch avise cuando el flujo vence
 
             # Filtro (Saliente)
             fm.match.in_port = in_port
@@ -194,6 +195,7 @@ class ProtoRouter(object):
             # Instalar Flujo Entrante (para respuesta)
             fm_back = of.ofp_flow_mod()
             fm_back.idle_timeout = 10
+            fm_back.flags |= of.OFPFF_SEND_FLOW_REM
 
             # Filtro (Entrante)
             fm_back.match.in_port = PUBLIC_PORT
@@ -212,6 +214,8 @@ class ProtoRouter(object):
             fm_back.actions.append(of.ofp_action_output(port=in_port))
             self.connection.send(fm_back)
 
+            self.nat_table.flows_installed(conn) # La conexion tiene los dos flujos instalados en el switch
+
             # 6. Enviar el primer paquete actual por el puerto público (aplicándole las mismas acciones de traducción)
             msg = of.ofp_packet_out()
             msg.data = packet.pack()
@@ -227,6 +231,38 @@ class ProtoRouter(object):
             # Al ser un NAT saliente, si un paquete entra desde la red pública y no matcheó con ninguna regla
             # entrante activa en el switch, es tráfico externo no solicitado y se descarta.
             log_color(RED, f"DROP: Tráfico entrante no solicitado desde {ip_pkt.srcip} hacia {ip_pkt.dstip}")
+
+    # El switch avisa que un flujo fue removido (idle timeout vencido)
+    # Cuando a una conexion no le queda ni flujo saliente ni entrante, se libera la entrada de la tabla NAT
+    def _handle_FlowRemoved(self, event):
+        match = event.ofp.match
+
+        # Solo importan los flujos de TCP/udp 
+        if match.nw_proto not in (ipv4.TCP_PROTOCOL, ipv4.UDP_PROTOCOL):
+            return
+
+        if match.in_port == PUBLIC_PORT: # Flujo entrante servidor:puerto -> ippublica:nat_port
+            direction = FLOW_IN
+            conn = self.nat_table.get_inbound(
+                match.nw_proto, match.tp_dst, match.nw_src, match.tp_src)
+        else: # flujo saliente: host privado:puerto -> servidor:puerto
+            direction = FLOW_OUT
+            conn = self.nat_table.get_outbound(
+                match.nw_proto, match.nw_src, match.tp_src, match.nw_dst, match.tp_dst)
+
+        if conn is None:
+            return
+
+        released = self.nat_table.flow_expired(conn, direction)
+
+        if released:
+            log_color(
+                CYAN, f"NAT LIBERADO: {conn.src_ip}:{conn.src_port} - {PUBLIC_IP}:{conn.nat_port} | "
+                f"DST: {conn.dst_ip}:{conn.dst_port} | Puerto público {conn.nat_port} disponible")
+        else:
+            log_color(
+                YELLOW, f"Flujo {direction} vencido: {conn.src_ip}:{conn.src_port} - {PUBLIC_IP}:{conn.nat_port} | "
+                f"La conexion sigue activa por el otro flujo")
 
     def handle_arp(self, event):
         # Obtiene el payload del paquete Ethernet

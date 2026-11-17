@@ -3,6 +3,10 @@ import time
 MIN_PORT = 10000
 MAX_PORT = 60000
 
+# Los dos flujos OpenFLow asociados a cada conexion
+FLOW_OUT = "saliente"
+FLOW_IN = "entrante"
+
 
 # Guarda toda la informacion de un flujo (una fila de la tabla NAT).
 class Connection:
@@ -25,6 +29,7 @@ class Connection:
         self.created_at = time.time()
         self.last_seen = self.created_at
 
+        self.active_flows = set() # Flujos de la conexion que siguen instalados en el switch    
     def update_last_seen(self):
         self.last_seen = time.time()
 
@@ -98,6 +103,28 @@ class NATTable:
         if conn is not None:
             conn.update_last_seen()
         return conn
+
+    # Gets que NO actualizan el last seen
+    def get_outbound(self, protocol, src_ip, src_port, dst_ip, dst_port):
+        return self.connections.get((protocol, src_ip, src_port, dst_ip, dst_port))
+
+    def get_inbound(self, protocol, nat_port, remote_ip, remote_port):
+        return self.reverse_connections.get((protocol, nat_port, remote_ip, remote_port))
+
+    # se llama cuando se instalaron los dos flujos de la conexion en el switch
+    def flows_installed(self, conn):
+        conn.active_flows = {FLOW_OUT, FLOW_IN}
+
+    
+    # Se llama cuando el switch aviso que se vencio un flujo de la conexion
+    # Se libera la conexion SOLAMENTE cuando no queda ningun flujo
+    def flow_expired(self, conn, direction):
+        conn.active_flows.discard(direction)
+        if conn.active_flows:
+            return False
+
+        self.remove_connection(conn)
+        return True
 
     # Libera la conexión de las tablas y devuelve el puerto al pool de disponibles.
     def remove_connection(self, conn):

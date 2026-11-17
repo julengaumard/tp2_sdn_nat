@@ -5,6 +5,7 @@ from pox.lib.addresses import EthAddr, IPAddr   # Address types
 from pox.lib.packet.ethernet import ethernet
 from pox.lib.packet import ipv4, arp
 from structs import NATTable, FLOW_OUT, FLOW_IN
+from arp_utils import create_arp_reply, send_arp_reply, create_arp_request
 
 
 log = core.getLogger()
@@ -26,70 +27,8 @@ PUBLIC_IP = IPAddr("200.0.0.254")           # IP del router en la red pública
 PUBLIC_MAC = EthAddr("00:00:00:aa:aa:aa")   # MAC del router hacia la red pública
 PRIVATE_MAC = EthAddr("00:00:00:bb:bb:bb")  # MAC del router hacia la red privada
 PUBLIC_PORT = 1                             # Puerto del switch conectado a la red pública
+FLOW_IDLE_TIMEOUT = 10                      # Segundos sin trafico hasta que el switch borra un flujo
 
-# TODO: moverlos a un archivo de methods.py
-def create_arp_reply(src_mac, src_ip, dst_mac, dst_ip):
-    packet = arp()
-    packet.opcode = arp.REPLY
-
-    packet.hwsrc = EthAddr(src_mac)
-    packet.protosrc = IPAddr(src_ip)
-
-    packet.hwdst = EthAddr(dst_mac)
-    packet.protodst = IPAddr(dst_ip)
-
-    return packet
-
-def send_arp_reply(self, event, arp_reply):
-    eth_packet = ethernet()
-    eth_packet.type = ethernet.ARP_TYPE
-
-    eth_packet.src = arp_reply.hwsrc
-    eth_packet.dst = arp_reply.hwdst
-    eth_packet.payload = arp_reply
-
-    msg = of.ofp_packet_out()
-    msg.data = eth_packet.pack()
-    msg.actions.append(of.ofp_action_output(port=event.port))
-
-    self.connection.send(msg)
-
-def create_arp_request(
-    target_ip,   # IP del dispositivo cuya MAC queremos averiguar.
-    out_port,    # Puerto OpenFlow por el que enviaremos el ARP Request.
-    router_mac,  # MAC de la interfaz del router conectada a esa red.
-    router_ip    # IP de esa misma interfaz del router.
-):
-
-    # Crear paquete ARP.
-    arp_req = arp()
-    arp_req.hwtype = arp.HW_TYPE_ETHERNET
-    arp_req.prototype = arp.PROTO_TYPE_IP
-    arp_req.hwlen = 6
-    arp_req.protolen = 4
-    arp_req.opcode = arp.REQUEST
-
-    # Datos de la interfaz del router desde la que se consulta.
-    arp_req.hwsrc = router_mac
-    arp_req.protosrc = router_ip
-
-    # MAC destino desconocida.
-    arp_req.hwdst = EthAddr("00:00:00:00:00:00")
-    arp_req.protodst = target_ip
-
-    # Encapsular en Ethernet.
-    eth = ethernet()
-    eth.type = ethernet.ARP_TYPE
-    eth.src = router_mac
-    eth.dst = EthAddr("ff:ff:ff:ff:ff:ff")
-    eth.payload = arp_req
-
-    # Enviar broadcast por la interfaz correspondiente.
-    msg = of.ofp_packet_out()
-    msg.data = eth.pack()
-    msg.actions.append(of.ofp_action_output(port=out_port))
-
-    return msg
 
 class ProtoRouter(object):
     def __init__(self, connection):
@@ -166,57 +105,12 @@ class ProtoRouter(object):
                 dst_port = transport.dstport
             )
 
-            fm = of.ofp_flow_mod()
-            fm.idle_timeout = 10
-            fm.flags |= of.OFPFF_SEND_FLOW_REM  # Flag que hace que el switch avise cuando el flujo vence
-
-            # Filtro (Saliente)
-            fm.match.in_port = in_port
-            fm.match.dl_type = 0x800 #Ipv4
-            fm.match.nw_proto = ip_pkt.protocol
-            fm.match.nw_src = ip_pkt.srcip
-            fm.match.nw_dst = ip_pkt.dstip
-            fm.match.tp_src = transport.srcport
-            fm.match.tp_dst = transport.dstport
-
-
-            # Acción (Saliente)
-            # Reescribe Macs (Origen: Mac publica del router, destino: Mac del servidor publico)
-            # Traduce ip origen privada a public_ip del router
-            # Puerto origen privado a nat_port asignado en la tabla 
-
-            fm.actions.append(of.ofp_action_dl_addr.set_src(PUBLIC_MAC))
-            fm.actions.append(of.ofp_action_dl_addr.set_dst(mac_dst))
-            fm.actions.append(of.ofp_action_nw_addr.set_src(PUBLIC_IP))
-            fm.actions.append(of.ofp_action_tp_port.set_src(conn.nat_port))
-            fm.actions.append(of.ofp_action_output(port=PUBLIC_PORT))
-            self.connection.send(fm)
-
-            # Instalar Flujo Entrante (para respuesta)
-            fm_back = of.ofp_flow_mod()
-            fm_back.idle_timeout = 10
-            fm_back.flags |= of.OFPFF_SEND_FLOW_REM
-
-            # Filtro (Entrante)
-            fm_back.match.in_port = PUBLIC_PORT
-            fm_back.match.dl_type = 0x800  # IPv4
-            fm_back.match.nw_proto = ip_pkt.protocol
-            fm_back.match.nw_src = ip_pkt.dstip
-            fm_back.match.nw_dst = PUBLIC_IP
-            fm_back.match.tp_src = transport.dstport
-            fm_back.match.tp_dst = conn.nat_port
-
-            # Acción (Entrante)
-            fm_back.actions.append(of.ofp_action_dl_addr.set_src(PRIVATE_MAC))
-            fm_back.actions.append(of.ofp_action_dl_addr.set_dst(packet.src))
-            fm_back.actions.append(of.ofp_action_nw_addr.set_dst(conn.src_ip))
-            fm_back.actions.append(of.ofp_action_tp_port.set_dst(conn.src_port))
-            fm_back.actions.append(of.ofp_action_output(port=in_port))
-            self.connection.send(fm_back)
-
+            # Instalar los dos flujos de la conexion en el switch
+            fm = self.install_outbound_flow(conn, in_port, mac_dst)
+            self.install_inbound_flow(conn, packet.src, in_port)
             self.nat_table.flows_installed(conn) # La conexion tiene los dos flujos instalados en el switch
 
-            # 6. Enviar el primer paquete actual por el puerto público (aplicándole las mismas acciones de traducción)
+            # Enviar el primer paquete actual por el puerto público (aplicándole las mismas acciones de traducción)
             msg = of.ofp_packet_out()
             msg.data = packet.pack()
             msg.in_port = in_port
@@ -231,6 +125,61 @@ class ProtoRouter(object):
             # Al ser un NAT saliente, si un paquete entra desde la red pública y no matcheó con ninguna regla
             # entrante activa en el switch, es tráfico externo no solicitado y se descarta.
             log_color(RED, f"DROP: Tráfico entrante no solicitado desde {ip_pkt.srcip} hacia {ip_pkt.dstip}")
+
+    # Crea un flow_mod con el idle timeout y el aviso de vencimiento
+    def new_flow_mod(self):
+        fm = of.ofp_flow_mod()
+        fm.idle_timeout = FLOW_IDLE_TIMEOUT
+        fm.flags |= of.OFPFF_SEND_FLOW_REM  # Flag que hace que el switch avise cuando el flujo vence
+        return fm
+
+    # Instala el flujo saliente: host privado:puerto -> servidor:puerto
+    # Devuelve el flow_mod, para reutilizar las acciones en el packet_out del primer paquete.
+    def install_outbound_flow(self, conn, in_port, server_mac):
+        fm = self.new_flow_mod()
+
+        # Filtro (Saliente)
+        fm.match.in_port = in_port
+        fm.match.dl_type = 0x800 #Ipv4
+        fm.match.nw_proto = conn.protocol
+        fm.match.nw_src = conn.src_ip
+        fm.match.nw_dst = conn.dst_ip
+        fm.match.tp_src = conn.src_port
+        fm.match.tp_dst = conn.dst_port
+
+        # Acción (Saliente)
+        # Reescribe Macs (Origen: Mac publica del router, destino: Mac del servidor publico)
+        # Traduce ip origen privada a public_ip del router
+        # Puerto origen privado a nat_port asignado en la tabla
+        fm.actions.append(of.ofp_action_dl_addr.set_src(PUBLIC_MAC))
+        fm.actions.append(of.ofp_action_dl_addr.set_dst(server_mac))
+        fm.actions.append(of.ofp_action_nw_addr.set_src(PUBLIC_IP))
+        fm.actions.append(of.ofp_action_tp_port.set_src(conn.nat_port))
+        fm.actions.append(of.ofp_action_output(port=PUBLIC_PORT))
+        self.connection.send(fm)
+
+        return fm
+
+    # Instala el flujo entrante (respuestas): servidor:puerto -> IP pública:nat_port
+    def install_inbound_flow(self, conn, host_mac, host_port):
+        fm_back = self.new_flow_mod()
+
+        # Filtro (Entrante)
+        fm_back.match.in_port = PUBLIC_PORT
+        fm_back.match.dl_type = 0x800  # IPv4
+        fm_back.match.nw_proto = conn.protocol
+        fm_back.match.nw_src = conn.dst_ip
+        fm_back.match.nw_dst = PUBLIC_IP
+        fm_back.match.tp_src = conn.dst_port
+        fm_back.match.tp_dst = conn.nat_port
+
+        # Acción (Entrante)
+        fm_back.actions.append(of.ofp_action_dl_addr.set_src(PRIVATE_MAC))
+        fm_back.actions.append(of.ofp_action_dl_addr.set_dst(host_mac))
+        fm_back.actions.append(of.ofp_action_nw_addr.set_dst(conn.src_ip))
+        fm_back.actions.append(of.ofp_action_tp_port.set_dst(conn.src_port))
+        fm_back.actions.append(of.ofp_action_output(port=host_port))
+        self.connection.send(fm_back)
 
     # El switch avisa que un flujo fue removido (idle timeout vencido)
     # Cuando a una conexion no le queda ni flujo saliente ni entrante, se libera la entrada de la tabla NAT
@@ -296,7 +245,7 @@ class ProtoRouter(object):
                 log_color(YELLOW, f"ARP Request ignorada: {arp_pkt.protodst} no es una IP del router.")
                 return
 
-            send_arp_reply(self, event, arp_reply)
+            send_arp_reply(self.connection, event.port, arp_reply)
 
         # Si recibe una Reply, es de alguna Request que genero.
             # Asi que busca los paquetes pendientes y los envia.
@@ -307,15 +256,9 @@ class ProtoRouter(object):
                 self.handle_ip(item["event"])
             return
  
-        # TODO:
-            # Ahora solo responde para si mismo, porque no hay otro host local, para pasar un mensaje de ARP
-            # Preguntar si agregamos eso o con esto ya esta.
-            # DUDA:
-                # Hay que permitir que resuelva de fuera? 
-                # O hay que bloquearlo?
+        # Solo se responden los ARP dirigidos a las IPs del router
         pass
 
-    # Solo si hay mas host locales
 
     def resolve_arp(self, target_ip, out_port, router_mac, router_ip, event):
         # Si ya conocemos la MAC, la devolvemos.
@@ -330,7 +273,7 @@ class ProtoRouter(object):
             msg = create_arp_request(
                 target_ip, out_port, router_mac, router_ip
             )
-            # TODO: Agregar un log_color
+            log_color(YELLOW, f"ARP Request enviado: quien tiene {target_ip}? (por el puerto {out_port})")
             self.connection.send(msg)
 
         # Agregar el Event (que incluye el paquete) a la lista de pendientes.
@@ -338,14 +281,6 @@ class ProtoRouter(object):
         self.pending_packets[target_ip].append({"event": event})
 
         return None 
-
-    # TODO: Se podria poner aca lo de fowarding? Asi se simplifica el handle_ip a simplemente a determinar y hacer llamados
-    def forward_packet(self, packet, in_port, out_port,
-                   src_mac, dst_mac):
-        # Instalar flujo OpenFlow.
-        # Modificar MACs.
-        # Reenviar paquete.
-        pass
 
 def launch():
 

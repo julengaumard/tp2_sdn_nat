@@ -5,29 +5,30 @@ from server import TCP_PORT
 
 
 SERVER_IP = "200.0.0.1"
-DURACION_MINUTOS = 10
-INTERVALO_SEG = 3
+CANT_MENSAJES = 180
+INTERVALO_SEG = 3.0
+TIMEOUT = 20.0
 
 def test_mucho_texto(client_name):
-    print(f"[{client_name}] Iniciando conversación de {DURACION_MINUTOS} minutos hacia {SERVER_IP}:{TCP_PORT}")
-    cant_mensajes = int(DURACION_MINUTOS * (60 / INTERVALO_SEG))
+    print(f"[{client_name}] Iniciando conversación de {CANT_MENSAJES * INTERVALO_SEG} minutos hacia {SERVER_IP}:{TCP_PORT}")
     contador = 1
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(10.0)
+    s.settimeout(TIMEOUT)
     s.connect((SERVER_IP, TCP_PORT))
 
-    while contador <= cant_mensajes:
+    while contador <= CANT_MENSAJES:
         try:
             mensaje = f"[{client_name}] Mensaje #{contador}"
             s.sendall(mensaje.encode())
 
             respuesta = s.recv(1024)
-            print(f"[{client_name}] Enviado #{contador} de {cant_mensajes} -> OK Respuesta: {respuesta.decode().strip()}")
+            print(f"[{client_name}] Enviado #{contador} de {CANT_MENSAJES} -> OK Respuesta: {respuesta.decode().strip()}")
 
             contador += 1
         except Exception as e:
             print(f"[{client_name}] Error en transmisión: {e}")
+            return
 
         time.sleep(INTERVALO_SEG)
 

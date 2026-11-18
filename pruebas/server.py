@@ -14,6 +14,8 @@ def handle_tcp(conn, addr):
             if not data:
                 break
             print(f"[SERVER TCP] Datos recibidos de {addr}: {data.decode().strip()}")
+
+            time.sleep(response_delay)
             conn.sendall(b"ACK_TCP: " + data)
     except Exception as e:
         print(f"[SERVER TCP] Conexión interrumpida con {addr}: {e}")
@@ -24,6 +26,7 @@ def handle_tcp(conn, addr):
 def run_tcp_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.settimeout(15.0)
     server.bind(("0.0.0.0", TCP_PORT))
     server.listen(10)
     print(f"[SERVER TCP] Escuchando en el puerto {TCP_PORT}...")
@@ -38,11 +41,16 @@ def run_udp_server():
     while True:
         data, addr = server.recvfrom(1024)
         print(f"[SERVER UDP] Paquete recibido de {addr}: {data.decode().strip()}")
+        time.sleep(response_delay)
         server.sendto(b"ACK_UDP: " + data, addr)
 
 if __name__ == "__main__":
+    response_delay = float(sys.argv[1] if len(sys.argv) > 1 else 0)
     sys.stdout = open("server.log", "w", buffering=1)
     sys.stderr = sys.stdout
+
+    if response_delay > 0:
+        print(f"Respondiendo con un delay de {response_delay} segundos")
 
     threading.Thread(target=run_tcp_server, daemon=True).start()
     threading.Thread(target=run_udp_server, daemon=True).start()

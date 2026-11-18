@@ -208,10 +208,18 @@ class ProtoRouter(object):
     def handle_arp(self, event):
         # Obtiene el payload del paquete Ethernet
         arp_pkt = event.parsed.find('arp')
+        packet = event.parsed
+
+        operation = "Request" if arp_pkt.opcode == arp.REQUEST else "Reply" if arp_pkt.opcode == arp.REPLY else f"opcode {arp_pkt.opcode}"
+        log_color(
+            YELLOW,
+            f"ARP {operation} recibido: {arp_pkt.protosrc} ({arp_pkt.hwsrc}) → "
+            f"{arp_pkt.protodst} ({arp_pkt.hwdst}) | In Port: {event.port}"
+        )
 
         # Aprender IP -> MAC
         self.arp_table[arp_pkt.protosrc] = arp_pkt.hwsrc
-            # {IP origen: MAC origen}
+        log_color(GREEN, f"ARP aprendido: {arp_pkt.protosrc} → {arp_pkt.hwsrc}")
  
         # Debemos manejarlo diferente, dependiendo de si es una Request o Reply
         if arp_pkt.opcode == arp.REQUEST:
@@ -232,17 +240,27 @@ class ProtoRouter(object):
                 return
 
             send_arp_reply(self.connection, event.port, arp_reply)
+            router_mac = PRIVATE_MAC if arp_pkt.protodst == PRIVATE_IP else PUBLIC_MAC
+            log_color(
+                CYAN,
+                f"ARP Reply enviado: {arp_pkt.protodst} es {router_mac} | Out Port: {event.port}"
+            )
+            return
 
         # Si recibe una Reply, es de alguna Request que genero.
             # Asi que busca los paquetes pendientes y los envia.
         if arp_pkt.opcode == arp.REPLY:
             pending = self.pending_packets.pop(arp_pkt.protosrc, [])
+            log_color(
+                GREEN if pending else YELLOW,
+                f"ARP Reply {arp_pkt.protosrc} → {arp_pkt.hwsrc}: "
+                f"{len(pending)} paquete(s) pendiente(s) para reenviar"
+            )
             for item in pending:
                 self.handle_ip(item["event"])
             return
- 
-        # Solo se responden los ARP dirigidos a las IPs del router
-        pass
+
+        log_color(YELLOW, f"ARP ignorado: opcode no soportado ({arp_pkt.opcode})")
 
 
     def resolve_arp(self, target_ip, out_port, router_mac, router_ip, event):

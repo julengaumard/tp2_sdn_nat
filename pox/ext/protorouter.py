@@ -63,14 +63,6 @@ class ProtoRouter(object):
         if ip_packet is None:
             return
 
-        # Ahora para debug. Se necesita, porque puede haber conexiones en el mismo.
-        if ip_packet.protocol == ipv4.TCP_PROTOCOL:
-            log_color(GREEN, "TCP")
-        elif ip_packet.protocol == ipv4.UDP_PROTOCOL:
-            log_color(GREEN, "UDP")
-        else:
-            log_color(GREEN, "OTROooo")
-
         log_color(
             YELLOW, f"RECIBIDO: {ip_pkt.srcip} → {ip_pkt.dstip} | "
             f"MAC: {packet.src} → {packet.dst} | In Port: {in_port}")
@@ -186,7 +178,7 @@ class ProtoRouter(object):
     def _handle_FlowRemoved(self, event):
         match = event.ofp.match
 
-        # Solo importan los flujos de TCP/udp 
+        # Solo importan los flujos de TCP/UDP 
         if match.nw_proto not in (ipv4.TCP_PROTOCOL, ipv4.UDP_PROTOCOL):
             return
 
@@ -217,12 +209,6 @@ class ProtoRouter(object):
         # Obtiene el payload del paquete Ethernet
         arp_pkt = event.parsed.find('arp')
 
-        print("Es una REQUEST? ", arp_pkt.opcode == arp.REQUEST)
-        print("MAC origen:", arp_pkt.hwsrc)
-        print("MAC destino:", arp_pkt.hwdst)
-        print("IP origen:", arp_pkt.protosrc)
-        print("IP destino:", arp_pkt.protodst)
-
         # Aprender IP -> MAC
         self.arp_table[arp_pkt.protosrc] = arp_pkt.hwsrc
             # {IP origen: MAC origen}
@@ -252,7 +238,6 @@ class ProtoRouter(object):
         if arp_pkt.opcode == arp.REPLY:
             pending = self.pending_packets.pop(arp_pkt.protosrc, [])
             for item in pending:
-                print("eberia enviar", item)
                 self.handle_ip(item["event"])
             return
  

@@ -184,7 +184,7 @@ class ProtoRouter(object):
 
         if match.in_port == PUBLIC_PORT: # Flujo entrante servidor:puerto -> ippublica:nat_port
             direction = FLOW_IN
-            conn = self.nat_table.get_inbound(
+            conn = self.nat_table.translate_inbound(
                 match.nw_proto, match.tp_dst, match.nw_src, match.tp_src)
         else: # flujo saliente: host privado:puerto -> servidor:puerto
             direction = FLOW_OUT

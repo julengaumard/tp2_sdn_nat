@@ -72,5 +72,5 @@ def run():
 
 if __name__ == '__main__':
     setLogLevel('info')
-    cant_host_privados = min(int(sys.argv[1]) if len(sys.argv) > 1 else 3, 8)
+    cant_host_privados = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     run()

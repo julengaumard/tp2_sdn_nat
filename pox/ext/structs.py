@@ -27,11 +27,8 @@ class Connection:
 
         # Gestión temporal
         self.created_at = time.time()
-        self.last_seen = self.created_at
 
         self.active_flows = set() # Flujos de la conexion que siguen instalados en el switch    
-    def update_last_seen(self):
-        self.last_seen = time.time()
 
 
 # Asigna las tablas de traducción (saliente y entrante) y la asignación de puertos.
@@ -75,7 +72,6 @@ class NATTable:
 
         if key in self.connections:
             conn = self.connections[key]
-            conn.update_last_seen()
             return conn
 
         nat_port = self.assign_port(protocol)
@@ -100,16 +96,11 @@ class NATTable:
     def translate_inbound(self, protocol, nat_port, remote_ip, remote_port):
         reverse_key = (protocol, nat_port, remote_ip, remote_port)
         conn = self.reverse_connections.get(reverse_key)
-        if conn is not None:
-            conn.update_last_seen()
         return conn
 
     # Gets que NO actualizan el last seen
     def get_outbound(self, protocol, src_ip, src_port, dst_ip, dst_port):
         return self.connections.get((protocol, src_ip, src_port, dst_ip, dst_port))
-
-    def get_inbound(self, protocol, nat_port, remote_ip, remote_port):
-        return self.reverse_connections.get((protocol, nat_port, remote_ip, remote_port))
 
     # se llama cuando se instalaron los dos flujos de la conexion en el switch
     def flows_installed(self, conn):

@@ -26,7 +26,6 @@ def handle_tcp(conn, addr):
 def run_tcp_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.settimeout(15.0)
     server.bind(("0.0.0.0", TCP_PORT))
     server.listen(10)
     print(f"[SERVER TCP] Escuchando en el puerto {TCP_PORT}...")
